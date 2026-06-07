@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>粒子星球 - 手势控制</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #050510;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        #canvas {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 1;
+        }
+
+        .video-hidden {
+            position: absolute;
+            top: 0; left: 0;
+            width: 1px; height: 1px;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .start-overlay {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(5, 5, 16, 0.5);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            transition: opacity 0.8s ease, visibility 0.8s;
+        }
+
+        .start-overlay.hidden {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        .start-btn {
+            padding: 16px 48px;
+            border: 1px solid rgba(255, 107, 43, 0.4);
+            border-radius: 12px;
+            background: rgba(255, 107, 43, 0.12);
+            color: #FF6B2B;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 500;
+            letter-spacing: 1px;
+            transition: all 0.3s;
+            font-family: inherit;
+        }
+
+        .start-btn:hover {
+            background: rgba(255, 107, 43, 0.25);
+            border-color: rgba(255, 107, 43, 0.7);
+            box-shadow: 0 0 30px rgba(255, 107, 43, 0.2);
+            transform: translateY(-2px);
+        }
+
+        .cam-preview {
+            position: fixed;
+            bottom: 80px;
+            right: 20px;
+            width: 160px;
+            height: 120px;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            z-index: 10;
+            opacity: 0;
+            transition: opacity 0.5s;
+            background: #000;
+        }
+
+        .cam-preview.visible { opacity: 0.6; }
+        .cam-preview:hover { opacity: 1; }
+
+        .cam-preview video {
+            width: 100%; height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+
+        .hint {
+            position: fixed;
+            top: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            color: rgba(255, 255, 255, 0.2);
+            font-size: 12px;
+            letter-spacing: 0.5px;
+            text-align: center;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <video id="webcam" class="video-hidden" autoplay playsinline></video>
+
+    <div class="start-overlay" id="startOverlay">
+        <button class="start-btn" id="startBtn">启动手势控制</button>
+    </div>
+
+    <div class="hint">旋转手掌控制视角 · 弯曲手指缩放 · 竖1指变爱心 · 竖2指变回星球</div>
+
+
+
+    <div class="cam-preview" id="camPreview">
+        <video id="camVideo" autoplay playsinline muted></video>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // ==================== 移动端检测 ====================
+        const isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+            || ('ontouchstart' in window && window.innerWidth < 768);
+
+        // ==================== DOM ====================
+        const canvas = document.getElementById('canvas');
+        const webcam = document.getElementById('webcam');
+        const camVideo = document.getElementById('camVideo');
+        const startBtn = document.getElementById('startBtn');
+        const startOverlay = document.getElementById('startOverlay');
+        const camPreview = document.getElementById('camPreview');
+
+        // ==================== Three.js 场景 ====================
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 200);
+
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, isMobile ? 1 : 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x050510, 1);
+
+        // ==================== 粒子系统参数 ====================
+        const PLANET_RADIUS = 2.8;
+        let PLANET_COUNT = 18000;
+        let RING1_COUNT = 5000;
+        let RING2_COUNT = 5000;
+        let DUST_COUNT = 2000;
+        let STAR_COUNT = 5000;
+        if (isMobile) {
+            PLANET_COUNT = 5000;
+            RING1_COUNT = 1500;
+            RING2_COUNT = 1500;
+            DUST_COUNT = 600;
+            STAR_COUNT = 1200;
+        }
+        const TOTAL = PLANET_COUNT + RING1_COUNT + RING2_COUNT + DUST_COUNT + STAR_COUNT;
+
+        // 存储原始位置用于动画
+        const basePositions = new Float32Array(TOTAL * 3);
+        const positions = new Float32Array(TOTAL * 3);
+        const colors = new Float32Array(TOTAL * 3);
+        const sizes = new Float32Array(TOTAL);
+
+        // 每个粒子的色相和随机相位，用于颜色动画
+        const particleHue = new Float32Array(TOTAL);
+        const particleHueSpeed = new Float32Array(TOTAL);
+        const particleSat = new Float32Array(TOTAL);
+        const particleLight = new Float32Array(TOTAL);
+
+        // 心形变形
+        const heartPositions = new Float32Array(TOTAL * 3);
+        const heartColors = new Float32Array(TOTAL * 3);
+        const origColors = new Float32Array(TOTAL * 3);
+        let morphTarget = 0;
+        let morphProgress = 0;
+        let needColorRestore = false;
+
+        // 星环原始本地坐标 (用于旋转计算)
+        const ring1Local = new Float32Array(RING1_COUNT * 3);
+        const ring2Local = new Float32Array(RING2_COUNT * 3);
+
+        let idx = 0;
+
+        // ==================== 星球粒子 ====================
+        // 球面粒子 (70%) - 密集球面
+        const surfaceCount = Math.floor(PLANET_COUNT * 0.7);
+        for (let i = 0; i < surfaceCount; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const r = PLANET_RADIUS + (Math.random() - 0.5) * 0.2;
+
+            basePositions[idx * 3] = Math.sin(phi) * Math.cos(theta) * r;
+            basePositions[idx * 3 + 1] = Math.cos(phi) * r;
+            basePositions[idx * 3 + 2] = Math.sin(phi) * Math.sin(theta) * r;
+
+            particleHue[idx] = (210 + Math.random() * 30) / 360; // 星空蓝
+            particleHueSpeed[idx] = 0;
+            particleSat[idx] = 0.5 + Math.random() * 0.5;
+            particleLight[idx] = 0.5 + Math.random() * 0.3;
+
+            sizes[idx] = 0.10 + Math.random() * 0.08;
+            idx++;
+        }
+
+        // 内部粒子 (30%) - 稀疏内部
+        const innerCount = PLANET_COUNT - surfaceCount;
+        for (let i = 0; i < innerCount; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const r = PLANET_RADIUS * Math.pow(Math.random(), 1 / 3) * 0.92;
+
+            basePositions[idx * 3] = Math.sin(phi) * Math.cos(theta) * r;
+            basePositions[idx * 3 + 1] = Math.cos(phi) * r;
+            basePositions[idx * 3 + 2] = Math.sin(phi) * Math.sin(theta) * r;
+
+            particleHue[idx] = (215 + Math.random() * 25) / 360; // 深星空蓝
+            particleHueSpeed[idx] = 0;
+            particleSat[idx] = 0.4 + Math.random() * 0.5;
+            particleLight[idx] = 0.3 + Math.random() * 0.3;
+
+            sizes[idx] = 0.07 + Math.random() * 0.05;
+            idx++;
+        }
+
+        // ==================== 星环1 (内环) ====================
+        const RING1_TILT = THREE.MathUtils.degToRad(15);
+        for (let i = 0; i < RING1_COUNT; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const r = 3.8 + Math.random() * 0.8;
+            const y = (Math.random() - 0.5) * 0.2;
+
+            // 本地坐标 (水平环)
+            ring1Local[i * 3] = Math.cos(theta) * r;
+            ring1Local[i * 3 + 1] = y;
+            ring1Local[i * 3 + 2] = Math.sin(theta) * r;
+
+            // 应用倾斜旋转得到世界坐标
+            const vec = new THREE.Vector3(ring1Local[i * 3], y, ring1Local[i * 3 + 2]);
+            vec.applyEuler(new THREE.Euler(RING1_TILT, 0, 0));
+
+            basePositions[idx * 3] = vec.x;
+            basePositions[idx * 3 + 1] = vec.y;
+            basePositions[idx * 3 + 2] = vec.z;
+
+            particleHue[idx] = (200 + Math.random() * 30) / 360; // 淡蓝白
+            particleHueSpeed[idx] = 0;
+            particleSat[idx] = 0.1 + Math.random() * 0.3;
+            particleLight[idx] = 0.75 + Math.random() * 0.25;
+
+            sizes[idx] = 0.07 + Math.random() * 0.06;
+            idx++;
+        }
+
+        // ==================== 星环2 (外环) ====================
+        const RING2_TILT = THREE.MathUtils.degToRad(-10);
+        for (let i = 0; i < RING2_COUNT; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const r = 5.2 + Math.random() * 1.0;
+            const y = (Math.random() - 0.5) * 0.25;
+
+            ring2Local[i * 3] = Math.cos(theta) * r;
+            ring2Local[i * 3 + 1] = y;
+            ring2Local[i * 3 + 2] = Math.sin(theta) * r;
+
+            const vec = new THREE.Vector3(ring2Local[i * 3], y, ring2Local[i * 3 + 2]);
+            vec.applyEuler(new THREE.Euler(RING2_TILT, 0, 0));
+
+            basePositions[idx * 3] = vec.x;
+            basePositions[idx * 3 + 1] = vec.y;
+            basePositions[idx * 3 + 2] = vec.z;
+
+            particleHue[idx] = (200 + Math.random() * 30) / 360; // 淡蓝白
+            particleHueSpeed[idx] = 0;
+            particleSat[idx] = 0.08 + Math.random() * 0.2;
+            particleLight[idx] = 0.7 + Math.random() * 0.3;
+
+            sizes[idx] = 0.06 + Math.random() * 0.05;
+            idx++;
+        }
+
+        // ==================== 空间尘埃 (稀疏蓝色粒子) ====================
+        for (let i = 0; i < DUST_COUNT; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const r = 8 + Math.random() * 14;
+
+            basePositions[idx * 3] = Math.sin(phi) * Math.cos(theta) * r;
+            basePositions[idx * 3 + 1] = Math.cos(phi) * r;
+            basePositions[idx * 3 + 2] = Math.sin(phi) * Math.sin(theta) * r;
+
+            particleHue[idx] = (200 + Math.random() * 40) / 360; // 蓝色
+            particleHueSpeed[idx] = 0;
+            particleSat[idx] = 0.5 + Math.random() * 0.5;
+            particleLight[idx] = 0.4 + Math.random() * 0.35;
+
+            sizes[idx] = 0.04 + Math.random() * 0.06;
+            idx++;
+        }
+
+        // ==================== 背景星点 ====================
+        for (let i = 0; i < STAR_COUNT; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const r = 20 + Math.random() * 80;
+
+            basePositions[idx * 3] = Math.sin(phi) * Math.cos(theta) * r;
+            basePositions[idx * 3 + 1] = Math.cos(phi) * r;
+            basePositions[idx * 3 + 2] = Math.sin(phi) * Math.sin(theta) * r;
+
+            particleHue[idx] = (210 + Math.random() * 30) / 360; // 星空蓝
+            particleHueSpeed[idx] = 0;
+            particleSat[idx] = 0.1 + Math.random() * 0.4;
+            particleLight[idx] = 0.4 + Math.random() * 0.5;
+
+            sizes[idx] = 0.02 + Math.random() * 0.05;
+            idx++;
+        }
+
+        // 复制初始位置
+        positions.set(basePositions);
+
+        // 初始化颜色
+        {
+            const _ic = new THREE.Color();
+            for (let i = 0; i < TOTAL; i++) {
+                _ic.setHSL(particleHue[i], particleSat[i], particleLight[i]);
+                colors[i * 3] = _ic.r;
+                colors[i * 3 + 1] = _ic.g;
+                colors[i * 3 + 2] = _ic.b;
+            }
+        }
+
+        // 保存原始颜色
+        origColors.set(colors);
+
+        // ==================== 心形目标位置（3D粉红爱心） ====================
+        {
+            const HEART_SCALE = 0.18;
+            const HEART_Y_OFFSET = 0.3;
+            const _hc = new THREE.Color();
+
+            // 心形隐式方程: (x²+y²-1)³ - x²y³ ≤ 0
+            // 拒绝采样在心形内均匀填充
+            let filled = 0;
+            while (filled < TOTAL) {
+                const px = (Math.random() * 2 - 1) * 1.3;
+                const py = Math.random() * 2.5 - 1.0;
+                const x2 = px * px;
+                const y2 = py * py;
+                const val = Math.pow(x2 + y2 - 1, 3) - x2 * py * py * py;
+                if (val <= 0) {
+                    const i3 = filled * 3;
+                    heartPositions[i3] = px * 16 * HEART_SCALE;
+                    heartPositions[i3 + 1] = py * 16 * HEART_SCALE + HEART_Y_OFFSET;
+
+                    // 3D深度：椭球截面，中心最厚边缘为0
+                    // 心形宽度约3.6单位，深度控制在1.5单位内
+                    const normalizedDist = Math.sqrt(x2 + y2); // 到中心的近似距离
+                    const maxDepth = 1.5 * (1 - normalizedDist * 0.5); // 中心厚边缘薄
+                    heartPositions[i3 + 2] = (Math.random() * 2 - 1) * Math.max(0.1, maxDepth);
+
+                    // 粉红色
+                    const pinkHue = (330 + Math.random() * 30) / 360;
+                    const pinkSat = 0.5 + Math.random() * 0.5;
+                    const pinkLight = 0.45 + Math.random() * 0.35;
+                    _hc.setHSL(pinkHue, pinkSat, pinkLight);
+                    heartColors[i3] = _hc.r;
+                    heartColors[i3 + 1] = _hc.g;
+                    heartColors[i3 + 2] = _hc.b;
+                    filled++;
+                }
+            }
+        }
+
+        // ==================== 创建粒子几何体 ====================
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+        // 自定义Shader：大尺寸圆形发光粒子
+        const vertexShader = `
+            attribute float size;
+            varying vec3 vColor;
+            void main() {
+                vColor = color;
+                vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                gl_PointSize = size * (300.0 / -mvPosition.z);
+                gl_PointSize = max(gl_PointSize, 1.0);
+                gl_Position = projectionMatrix * mvPosition;
+            }
+        `;
+
+        const fragmentShader = `
+            varying vec3 vColor;
+            void main() {
+                float d = length(gl_PointCoord - vec2(0.5));
+                if (d > 0.5) discard;
+                float glow = 1.0 - smoothstep(0.0, 0.5, d);
+                float core = 1.0 - smoothstep(0.0, 0.15, d);
+                vec3 col = vColor * glow + vec3(1.0) * core * 0.4;
+                gl_FragColor = vec4(col, glow * 0.92);
+            }
+        `;
+
+        const material = new THREE.ShaderMaterial({
+            vertexShader,
+            fragmentShader,
+            vertexColors: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            transparent: true,
+        });
+
+        const points = new THREE.Points(geometry, material);
+        scene.add(points);
+
+        // ==================== 相机控制 ====================
+        let camAzimuth = 0;
+        let camElevation = 0.25;
+        let camRadius = 12;
+        const MIN_RADIUS = 5;
+        const MAX_RADIUS = 60;
+
+        let targetAzimuth = 0;
+        let targetElevation = 0.25;
+        let targetRadius = 12;
+
+        // 初始化相机位置
+        camera.position.set(0, camRadius * Math.sin(camElevation), camRadius * Math.cos(camAzimuth) * Math.cos(camElevation));
+        camera.lookAt(0, 0, 0);
+
+        // ==================== 手势状态 ====================
+        let isRunning = false;
+        let prevHandAngle = null;
+        let prevWristY = null;
+        let gestureActive = false;
+        let zoomDuration = 0;
+
+        function countExtendedFingers(lm) {
+            let count = 0;
+            // 拇指：tip(4)到掌心距离 vs IP(3)到掌心距离
+            const palmX = (lm[0].x + lm[5].x + lm[17].x) / 3;
+            const palmY = (lm[0].y + lm[5].y + lm[17].y) / 3;
+            const thumbDist = Math.hypot(lm[4].x - palmX, lm[4].y - palmY);
+            const thumbRef = Math.hypot(lm[3].x - palmX, lm[3].y - palmY);
+            if (thumbDist > thumbRef * 1.2) count++;
+            // 四指：tip vs PIP
+            if (lm[8].y < lm[6].y - 0.015) count++;
+            if (lm[12].y < lm[10].y - 0.015) count++;
+            if (lm[16].y < lm[14].y - 0.015) count++;
+            if (lm[20].y < lm[18].y - 0.015) count++;
+            return count;
+        }
+
+        function getPalmSize(lm) {
+            // 手掌大小：手腕(0)到中指MCP(9)的距离
+            return Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y);
+        }
+
+        function getHandAngle(lm) {
+            return Math.atan2(lm[9].y - lm[0].y, lm[9].x - lm[0].x);
+        }
+
+        function processHand(lm) {
+            gestureActive = true;
+
+            // 1. 旋转：手方向角变化 → 相机方位角
+            const angle = getHandAngle(lm);
+            if (prevHandAngle !== null) {
+                let delta = angle - prevHandAngle;
+                if (delta > Math.PI) delta -= 2 * Math.PI;
+                if (delta < -Math.PI) delta += 2 * Math.PI;
+                targetAzimuth -= delta * 3.5;
+            }
+            prevHandAngle = angle;
+
+            // 2. 手指计数 + 手掌大小
+            const fingers = countExtendedFingers(lm);
+            const palmSize = getPalmSize(lm);
+
+            // 手指弯曲度检测
+            const palmCX = (lm[0].x + lm[5].x + lm[17].x) / 3;
+            const palmCY = (lm[0].y + lm[5].y + lm[17].y) / 3;
+
+            function fingerCurlValue(tipIdx, mcpIdx) {
+                const tipDist = Math.hypot(lm[tipIdx].x - palmCX, lm[tipIdx].y - palmCY);
+                const mcpDist = Math.hypot(lm[mcpIdx].x - palmCX, lm[mcpIdx].y - palmCY);
+                if (mcpDist < 0.001) return 0;
+                return tipDist / mcpDist;
+            }
+
+            const indexCurl = fingerCurlValue(8, 5);
+            const middleCurl = fingerCurlValue(12, 9);
+            const ringCurl = fingerCurlValue(16, 13);
+            const pinkyCurl = fingerCurlValue(20, 17);
+
+            const indexExt = indexCurl > 0.95 && lm[8].y < lm[6].y;
+            const middleExt = middleCurl > 0.95 && lm[12].y < lm[10].y;
+            const middleCurled = middleCurl < 0.95;
+            const ringCurled = ringCurl < 0.95;
+            const pinkyCurled = pinkyCurl < 0.95;
+
+            // 检测各手势
+            const isFive = fingers >= 4 && palmSize > 0.13;
+            const isTwoFingers = indexExt && middleExt && ringCurled && pinkyCurled;
+            const isOneFinger = indexExt && middleCurled && ringCurled && pinkyCurled;
+
+            // 1指→爱心，2指→星球
+            if (isOneFinger && !isTwoFingers) {
+                morphTarget = 1;
+            } else if (isTwoFingers) {
+                morphTarget = 0;
+            }
+
+            const isFist = !isOneFinger && !isTwoFingers && !isFive && (fingers <= 1 || palmSize < 0.12);
+            const isOpen = isFive;
+
+            // 3. 手指弯曲程度控制缩放（连续值，0=全伸直，1=全弯曲）
+            // palmCX/palmCY已在上方定义
+            function fingerCurl(tipIdx, pipIdx, mcpIdx) {
+                const tipDist = Math.hypot(lm[tipIdx].x - palmCX, lm[tipIdx].y - palmCY);
+                const mcpDist = Math.hypot(lm[mcpIdx].x - palmCX, lm[mcpIdx].y - palmCY);
+                if (mcpDist < 0.001) return 0;
+                return 1 - Math.min(1, tipDist / mcpDist);
+            }
+            const curlIndex = fingerCurl(8, 6, 5);
+            const curlMiddle = fingerCurl(12, 10, 9);
+            const curlRing = fingerCurl(16, 14, 13);
+            const curlPinky = fingerCurl(20, 18, 17);
+            const avgCurl = (curlIndex + curlMiddle + curlRing + curlPinky) / 4;
+
+            // 弯曲程度映射到目标半径：弯曲→拉远，伸直→靠近
+            const curlRadius = MIN_RADIUS + avgCurl * (MAX_RADIUS - MIN_RADIUS);
+            targetRadius += (curlRadius - targetRadius) * 0.08;
+
+            targetRadius = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, targetRadius));
+
+            // 4. 仰角：手Y位置映射
+            const palmY = (lm[0].y + lm[9].y) / 2;
+            targetElevation = (0.5 - palmY) * 2.0;
+            targetElevation = Math.max(-0.6, Math.min(1.0, targetElevation));
+
+        }
+
+        // ==================== MediaPipe Hands (旧版script方式) ====================
+        let mpHands = null;
+        let mpCamera = null;
+
+        async function initHands() {
+            mpHands = new Hands({
+                locateFile: (file) =>
+                    `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`,
+            });
+            mpHands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.6,
+                minTrackingConfidence: 0.5,
+            });
+            mpHands.onResults((results) => {
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    processHand(results.multiHandLandmarks[0]);
+                } else {
+                    prevHandAngle = null;
+                    prevWristY = null;
+                    zoomDuration = 0;
+                    gestureActive = false;
+                }
+            });
+            await mpHands.initialize();
+        }
+
+        async function startCamera() {
+            mpCamera = new Camera(webcam, {
+                onFrame: async () => {
+                    await mpHands.send({ image: webcam });
+                },
+                width: isMobile ? 320 : 640,
+                height: isMobile ? 240 : 480,
+                facingMode: 'user',
+            });
+            await mpCamera.start();
+            // 同步到预览视频
+            camVideo.srcObject = webcam.srcObject;
+            camVideo.play();
+        }
+
+        startBtn.addEventListener('click', async () => {
+            try {
+                startBtn.textContent = '启动中...';
+                startBtn.disabled = true;
+                await initHands();
+                await startCamera();
+                isRunning = true;
+                startOverlay.classList.add('hidden');
+                camPreview.classList.add('visible');
+            } catch (e) {
+                console.error(e);
+                startBtn.textContent = '启动失败，点击重试';
+                startBtn.disabled = false;
+            }
+        });
+
+        // ==================== 鼠标/触摸备选 ====================
+        let isDragging = false;
+        let prevMX = 0, prevMY = 0;
+
+        canvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            prevMX = e.clientX;
+            prevMY = e.clientY;
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (isDragging) {
+                targetAzimuth -= (e.clientX - prevMX) * 0.005;
+                targetElevation += (e.clientY - prevMY) * 0.003;
+                targetElevation = Math.max(-0.6, Math.min(1.0, targetElevation));
+                prevMX = e.clientX;
+                prevMY = e.clientY;
+            }
+        });
+
+        window.addEventListener('mouseup', () => { isDragging = false; });
+
+        canvas.addEventListener('wheel', (e) => {
+            targetRadius += e.deltaY * 0.01;
+            targetRadius = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, targetRadius));
+        }, { passive: true });
+
+        canvas.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 1) {
+                isDragging = true;
+                prevMX = e.touches[0].clientX;
+                prevMY = e.touches[0].clientY;
+            }
+        }, { passive: true });
+
+        canvas.addEventListener('touchmove', (e) => {
+            if (isDragging && e.touches.length === 1) {
+                targetAzimuth -= (e.touches[0].clientX - prevMX) * 0.005;
+                targetElevation += (e.touches[0].clientY - prevMY) * 0.003;
+                targetElevation = Math.max(-0.6, Math.min(1.0, targetElevation));
+                prevMX = e.touches[0].clientX;
+                prevMY = e.touches[0].clientY;
+            }
+        }, { passive: true });
+
+        canvas.addEventListener('touchend', () => { isDragging = false; });
+
+        // ==================== 动画循环 ====================
+        const clock = new THREE.Clock();
+        let elapsed = 0;
+
+        // 星环旋转累积角度
+        let ring1RotY = 0;
+        let ring2RotY = 0;
+
+        // 预分配旋转矩阵和Euler，避免每帧GC
+        const _r1Mat = new THREE.Matrix4();
+        const _r2Mat = new THREE.Matrix4();
+        const _r1Euler = new THREE.Euler();
+        const _r2Euler = new THREE.Euler();
+        const _vec = new THREE.Vector3();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = Math.min(clock.getDelta(), 0.1);
+            elapsed += dt;
+
+            // 变形进度平滑过渡
+            morphProgress += (morphTarget - morphProgress) * 3.0 * dt;
+            if (Math.abs(morphProgress - morphTarget) < 0.001) morphProgress = morphTarget;
+
+            // 自动缓慢旋转（爱心模式下不旋转）
+            if (!gestureActive && !isDragging && morphProgress < 0.5) {
+                targetAzimuth += 0.12 * dt;
+            }
+
+            // 爱心模式下，相机锁定正面视角
+            if (morphProgress > 0.5) {
+                targetAzimuth += (0 - targetAzimuth) * 2.0 * dt;
+                targetElevation += (0.15 - targetElevation) * 2.0 * dt;
+            }
+
+            // 平滑插值
+            const lerp = 5 * dt;
+            camAzimuth += (targetAzimuth - camAzimuth) * lerp;
+            camElevation += (targetElevation - camElevation) * lerp;
+            camRadius += (targetRadius - camRadius) * lerp;
+
+            // 更新相机 (球坐标)
+            camera.position.x = camRadius * Math.sin(camAzimuth) * Math.cos(camElevation);
+            camera.position.y = camRadius * Math.sin(camElevation);
+            camera.position.z = camRadius * Math.cos(camAzimuth) * Math.cos(camElevation);
+            camera.lookAt(0, 0, 0);
+
+            // 星环旋转角度
+            ring1RotY += dt * 0.15;
+            ring2RotY -= dt * 0.10;
+
+            const posAttr = geometry.attributes.position;
+            const arr = posAttr.array;
+
+            // 星球粒子：微脉动 + 微抖动
+            const pulse = 1.0 + Math.sin(elapsed * 1.5) * 0.006;
+            for (let i = 0; i < PLANET_COUNT; i++) {
+                const i3 = i * 3;
+                arr[i3] = basePositions[i3] * pulse + (Math.random() - 0.5) * 0.003;
+                arr[i3 + 1] = basePositions[i3 + 1] * pulse + (Math.random() - 0.5) * 0.003;
+                arr[i3 + 2] = basePositions[i3 + 2] * pulse + (Math.random() - 0.5) * 0.003;
+            }
+
+            // 星环1：绕倾斜轴旋转 (使用预计算旋转矩阵)
+            const ring1Start = PLANET_COUNT;
+            _r1Euler.set(RING1_TILT, ring1RotY, 0);
+            _r1Mat.makeRotationFromEuler(_r1Euler);
+            for (let i = 0; i < RING1_COUNT; i++) {
+                const li = i * 3;
+                _vec.set(ring1Local[li], ring1Local[li + 1], ring1Local[li + 2]).applyMatrix4(_r1Mat);
+                const ai = (ring1Start + i) * 3;
+                arr[ai] = _vec.x;
+                arr[ai + 1] = _vec.y;
+                arr[ai + 2] = _vec.z;
+            }
+
+            // 星环2：绕倾斜轴旋转
+            const ring2Start = PLANET_COUNT + RING1_COUNT;
+            _r2Euler.set(RING2_TILT, ring2RotY, 0);
+            _r2Mat.makeRotationFromEuler(_r2Euler);
+            for (let i = 0; i < RING2_COUNT; i++) {
+                const li = i * 3;
+                _vec.set(ring2Local[li], ring2Local[li + 1], ring2Local[li + 2]).applyMatrix4(_r2Mat);
+                const ai = (ring2Start + i) * 3;
+                arr[ai] = _vec.x;
+                arr[ai + 1] = _vec.y;
+                arr[ai + 2] = _vec.z;
+            }
+
+            // 变形：粒子向心形位置插值
+            if (morphProgress > 0.001) {
+                // 重置尘埃和星点位置（它们不在上面的循环中更新）
+                const dustStart = PLANET_COUNT + RING1_COUNT + RING2_COUNT;
+                for (let i = dustStart; i < TOTAL; i++) {
+                    const i3 = i * 3;
+                    arr[i3] = basePositions[i3];
+                    arr[i3 + 1] = basePositions[i3 + 1];
+                    arr[i3 + 2] = basePositions[i3 + 2];
+                }
+                // 位置插值
+                for (let i = 0; i < TOTAL; i++) {
+                    const i3 = i * 3;
+                    const nx = arr[i3], ny = arr[i3 + 1], nz = arr[i3 + 2];
+                    arr[i3] = nx + (heartPositions[i3] - nx) * morphProgress;
+                    arr[i3 + 1] = ny + (heartPositions[i3 + 1] - ny) * morphProgress;
+                    arr[i3 + 2] = nz + (heartPositions[i3 + 2] - nz) * morphProgress;
+                }
+                // 颜色插值
+                const colArr = geometry.attributes.color.array;
+                for (let i = 0; i < TOTAL * 3; i++) {
+                    colArr[i] = origColors[i] + (heartColors[i] - origColors[i]) * morphProgress;
+                }
+                geometry.attributes.color.needsUpdate = true;
+                needColorRestore = true;
+            } else if (needColorRestore) {
+                // 恢复原始颜色和尘埃/星点位置
+                const colArr = geometry.attributes.color.array;
+                colArr.set(origColors);
+                geometry.attributes.color.needsUpdate = true;
+                const dustStart = PLANET_COUNT + RING1_COUNT + RING2_COUNT;
+                for (let i = dustStart; i < TOTAL; i++) {
+                    const i3 = i * 3;
+                    arr[i3] = basePositions[i3];
+                    arr[i3 + 1] = basePositions[i3 + 1];
+                    arr[i3 + 2] = basePositions[i3 + 2];
+                }
+                needColorRestore = false;
+            }
+
+            posAttr.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+        // ==================== 窗口大小 ====================
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ==================== 启动 ====================
+        animate();
+    </script>
+</body>
+</html>
